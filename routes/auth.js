@@ -15,7 +15,7 @@ const tokenBlacklist = new Set();
 
 // Register
 router.post('/register', async (req, res) => {
-    const {  email, password } = req.body;
+    const { username,mobile, email, password } = req.body;
     try {
         let user = await User.findOne({ email });
         if (user) return res.status(400).json({ msg: 'User already exists' });
@@ -23,10 +23,11 @@ router.post('/register', async (req, res) => {
         user = new User({
             email,
             password: await bcrypt.hash(password, 10),
+            username,mobile
         });
 
         await user.save();
-        res.json({ msg: 'User registered successfully' });
+        res.json({ message: 'User registered successfully' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
