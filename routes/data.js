@@ -6,7 +6,7 @@ const {authenticateToken} = require('./jwt');
 const moment = require('moment-timezone');
 
 const skodaDbUrl = "mongodb://localhost:27017/skoda"; 
-const tataDbUrl = "mongodb://localhost:27017/skoda"; 
+
 const loanUrl = "mongodb://localhost:27017/skoda";
 const collectionNames = {
   skoda: "skoda", // Replace with your Skoda collection name
@@ -34,10 +34,10 @@ async function getDatabase(dataName) {
     throw new Error("Failed to connect to the database: " + err.message);
   }
 }
-
-routes.get("/viewdata/:dataName", authenticateToken, async (req, res) => {
-  const dataName = req.params.dataName;
-  const format = req.query.format || "json";
+//Viewdata and Download 
+routes.get('/viewdata/:dataName', authenticateToken, async (req, res) => {
+  const { dataName } = req.params;
+  const format = req.query.format || 'json';
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 10;
   const skip = (page - 1) * limit;
@@ -46,19 +46,23 @@ routes.get("/viewdata/:dataName", authenticateToken, async (req, res) => {
 
   const name = req.query.name ? req.query.name.trim() : '';
   const email = req.query.email ? req.query.email.trim() : '';
-  const mobile = req.query.mobile ? req.query.mobile.trim() : ''; // Treat mobile as a string
-  const app_id = req.query.app_id ? req.query.app_id.trim() : ''; // Treat app_id as a string
+  const mobile = req.query.mobile ? req.query.mobile.trim() : '';
+  const app_id = req.query.app_id ? req.query.app_id.trim() : '';
 
   const dateRange = req.query.dateRange;
-  const customStart = req.query.customStartDate ? new Date(Date.parse(req.query.customStartDate + 'T00:00:00Z')) : null;
-  const customEnd = req.query.customEndDate ? new Date(Date.parse(req.query.customEndDate + 'T23:59:59Z')) : null;
+  const customStart = req.query.customStartDate
+    ? new Date(Date.parse(req.query.customStartDate + 'T00:00:00Z'))
+    : null;
+  const customEnd = req.query.customEndDate
+    ? new Date(Date.parse(req.query.customEndDate + 'T23:59:59Z'))
+    : null;
 
   try {
     const db = await getDatabase(dataName);
     const collectionName = collectionNames[dataName];
 
     if (!collectionName) {
-      throw new Error("No collection found for data name: " + dataName);
+      return res.status(404).send(`No collection found for data name: ${dataName}`);
     }
 
     const collection = db.collection(collectionName);
@@ -67,13 +71,14 @@ routes.get("/viewdata/:dataName", authenticateToken, async (req, res) => {
     if (name) filter['name'] = { $regex: name, $options: 'i' };
     if (email) filter['email'] = { $regex: email, $options: 'i' };
 
-    // Use aggregation to convert mobile and app_id to string and then apply regex for partial matching
     const aggregationPipeline = [
       { $match: filter },
-      { $addFields: {
-        mobileStr: { $toString: "$mobile" },  // Convert mobile to string
-        appIdStr: { $toString: "$app_id" }    // Convert app_id to string
-      }}
+      {
+        $addFields: {
+          mobileStr: { $toString: '$mobile' },
+          appIdStr: { $toString: '$app_id' }
+        }
+      }
     ];
 
     if (mobile) {
@@ -92,7 +97,7 @@ routes.get("/viewdata/:dataName", authenticateToken, async (req, res) => {
     if (dateRange === 'today') {
       const startOfDay = new Date(now.setHours(0, 0, 0, 0));
       const endOfDay = new Date(now.setHours(23, 59, 59, 999));
-      filter['createdAt'] = { $gte: startOfDay, $lt: endOfDay };
+      filter['createdAt'] = { $gte: startOfDay, $lte: endOfDay };
     } else if (dateRange === 'thisWeek') {
       const startOfWeek = new Date(now);
       startOfWeek.setDate(now.getDate() - now.getDay());
@@ -100,54 +105,204 @@ routes.get("/viewdata/:dataName", authenticateToken, async (req, res) => {
       const endOfWeek = new Date(startOfWeek);
       endOfWeek.setDate(startOfWeek.getDate() + 6);
       endOfWeek.setHours(23, 59, 59, 999);
-      filter['createdAt'] = { $gte: startOfWeek, $lt: endOfWeek };
+      filter['createdAt'] = { $gte: startOfWeek, $lte: endOfWeek };
     } else if (dateRange === 'thisMonth') {
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
       endOfMonth.setHours(23, 59, 59, 999);
-      filter['createdAt'] = { $gte: startOfMonth, $lt: endOfMonth };
+      filter['createdAt'] = { $gte: startOfMonth, $lte: endOfMonth };
     } else if (dateRange === 'custom' && customStart && customEnd) {
       filter['createdAt'] = { $gte: customStart, $lte: customEnd };
     }
 
-    // Push the limit, skip, and sort to the aggregation pipeline
-    aggregationPipeline.push({ $sort: { [sortBy]: sortOrder } });
+    aggregationPipeline.push({ $match: filter }, { $sort: { [sortBy]: sortOrder } });
 
-    // Determine if we should apply pagination based on format
-    if (format !== "csv") {
+    if (format !== 'csv' && format !== 'json') {
+      return res.status(400).send('Invalid format specified');
+    }
+
+    if (format !== 'csv') {
       aggregationPipeline.push({ $skip: skip }, { $limit: limit });
     }
 
-    // Execute query
     let data = await collection.aggregate(aggregationPipeline).toArray();
-    let totalRecords = await collection.countDocuments(filter); // count without pagination
-
+    let totalRecords = await collection.countDocuments(filter);
     const totalPages = Math.ceil(totalRecords / limit);
 
-    const responseData = {
-      data,
-      totalRecords,
-      totalPages,
-      currentPage: page,
-    };
-
-    if (format === "csv") {
+    if (format === 'csv') {
       try {
-        const csv = parse(data);
-        res.header("Content-Type", "text/csv");
+        const csv = parse(data); // Remove explicit fields to include all fields
+        res.header('Content-Type', 'text/csv');
         res.attachment(`${dataName}.csv`);
-        res.send(csv);
+        return res.send(csv);
       } catch (err) {
-        res.status(500).send("Error generating CSV");
+        return res.status(500).send('Error generating CSV');
       }
     } else {
-      res.json(responseData);
+      const responseData = {
+        data,
+        totalRecords,
+        totalPages,
+        currentPage: page
+      };
+      return res.json(responseData);
     }
   } catch (error) {
-    res.status(500).send("Error fetching data: " + error.message);
+    console.error('Error fetching data:', error);
+    return res.status(500).send(`Error fetching data: ${error.message}`);
+  }
+});
+//loan dashboard
+routes.get('/api/dashboard', async (req, res) => {
+  try {
+    const db = await getDatabase('loan');
+    const collection = db.collection(collectionNames.loan);
+
+    // Total Applications
+    const totalApplications = await collection.countDocuments();
+
+    // Average Credit Score
+    const creditScoreAgg = await collection.aggregate([
+      { $match: { "data.credit_score": { $exists: true } } },
+      { $group: { _id: null, avgCreditScore: { $avg: "$data.credit_score" } } }
+    ]).toArray();
+    const averageCreditScore = creditScoreAgg.length > 0 ? Math.round(creditScoreAgg[0].avgCreditScore) : 0;
+
+    // Application Status
+    const statusAgg = await collection.aggregate([
+      { $group: { _id: "$approval.status", count: { $sum: 1 } } }
+    ]).toArray();
+    const status = { Approved: 0, Pending: 0, Rejected: 0 };
+    statusAgg.forEach(item => {
+      status[item._id] = item.count;
+    });
+
+    // Geographic Distribution (Only valid Indian states)
+    const geoAgg = await collection.aggregate([
+      { $match: { "d.comm_state": { $ne: null, $exists: true } } },
+      { $group: { _id: "$d.comm_state", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ]).toArray();
+    const stateNames = {
+      "1": "Punjab", "2": "Haryana", "3": "Rajasthan", "4": "Uttar Pradesh", "5": "Bihar",
+      "6": "Madhya Pradesh", "7": "Maharashtra", "8": "Gujarat", "9": "Delhi", "10": "West Bengal",
+      "11": "Odisha", "12": "Kerala", "13": "Tamil Nadu", "14": "Karnataka", "15": "Andhra Pradesh",
+      "16": "Telangana", "17": "Assam", "18": "Jharkhand", "19": "Chhattisgarh", "20": "Uttarakhand",
+      "21": "Himachal Pradesh", "22": "Jammu and Kashmir", "23": "Tamil Nadu", "24": "Goa"
+    };
+    const geographicDistribution = {};
+    geoAgg.forEach(item => {
+      if (stateNames[item._id]) {
+        geographicDistribution[stateNames[item._id]] = item.count;
+      }
+    });
+
+    // Recent Activity (Using email instead of approval status, date instead of time)
+    const recentActivity = await collection.find()
+      .sort({ lastHit: -1 })
+      .limit(5)
+      .toArray();
+    const formattedActivity = recentActivity.map(item => ({
+      name: item.name,
+      email: item.email,
+      date: new Date(item.lastHit).toLocaleDateString()
+    }));
+
+    // Mock percentage changes (since we don't have historical data)
+    const totalApplicationsChange = 12;
+    const averageCreditScoreChange = -3;
+
+    res.json({
+      totalApplications,
+      totalApplicationsChange,
+      averageCreditScore,
+      averageCreditScoreChange,
+      status,
+      geographicDistribution,
+      recentActivity: formattedActivity
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
+//skoda dashboard
+routes.get('/api/skoda-dashboard', async (req, res) => {
+  try {
+    const db = await getDatabase('skoda');
+    const collection = db.collection(collectionNames.skoda);
+
+    // Total Leads
+    const totalLeads = await collection.countDocuments();
+
+    // Model Distribution (Only Slavia, Kushaq, Kodiaq)
+    const modelAgg = await collection.aggregate([
+      { $match: { model: { $in: ["Slavia", "Kushaq", "Kodiaq"] } } },
+      { $group: { _id: "$model", count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]).toArray();
+    const modelDistribution = {};
+    modelAgg.forEach(item => {
+      modelDistribution[item._id] = item.count;
+    });
+
+    // Lead Status (Based on reason field: success -> Accepted, rejected -> Rejected)
+    const statusAgg = await collection.aggregate([
+      { $group: { _id: "$reason", count: { $sum: 1 } } }
+    ]).toArray();
+    const status = { Approved: 0, Pending: 0, Rejected: 0 };
+    statusAgg.forEach(item => {
+      if (item._id.includes("success")) {
+        status.Approved += item.count; // Mapping "Accepted" to "Approved" for frontend consistency
+      } else if (item._id.includes("rejected")) {
+        status.Rejected += item.count;
+      } else {
+        status.Pending += item.count; // For any other status, if present
+      }
+    });
+
+    // Geographic Distribution
+    const geoAgg = await collection.aggregate([
+      { $match: { state: { $ne: null, $exists: true } } },
+      { $group: { _id: "$state", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ]).toArray();
+    const geographicDistribution = {};
+    geoAgg.forEach(item => {
+      geographicDistribution[item._id] = item.count;
+    });
+
+    // Recent Activity
+    const recentActivity = await collection.find()
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray();
+    const formattedActivity = recentActivity.map(item => ({
+      name: item.name,
+      model: item.model,
+      city: item.city,
+      state: item.state,
+      dealer_details: item.dealer_details,
+      reason: item.reason,
+      status: item.reason.includes("success") ? "Approved" : "Rejected",
+      time: new Date(item.createdAt).toLocaleString()
+    }));
+
+    res.json({
+      totalLeads,
+      modelDistribution,
+      status,
+      geographicDistribution,
+      recentActivity: formattedActivity
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+//Visualize data acordingly week
 routes.get('/api/lead-summary/:dataName', async (req, res) => {
   const dataName = req.params.dataName;
   const dateRange = req.query.dateRange || 'thisWeek';
@@ -264,7 +419,7 @@ function calculatePercentageChanges(counts) {
   changes.unshift(0); // First day has no change
   return changes;
 }
-
+//model 
 routes.get("/model-popularity",async (req, res) => {
   try {
     const db = await getDatabase("skoda"); // Assuming Skoda data is in the "skoda" database
@@ -283,7 +438,7 @@ routes.get("/model-popularity",async (req, res) => {
     res.status(500).send("Error fetching model popularity: " + error.message);
   }
 });
-
+//skoda leads over time
 routes.get("/leads-over-time", async (req, res) => {
   try {
     const db = await getDatabase("skoda");
@@ -357,7 +512,7 @@ routes.get("/leads-over-time", async (req, res) => {
     res.status(500).send("Error fetching leads over time: " + error.message);
   }
 });
-
+//loan leads over time
 routes.get("/lead-over-time", async (req, res) => {
   try {
     const db = await getDatabase("loan");
@@ -432,7 +587,7 @@ routes.get("/lead-over-time", async (req, res) => {
   }
 });
 
-
+//loan credit distribution
 routes.get('/api/credit-distribution/:dataName', async (req, res) => {
   const dataName = req.params.dataName;
   const { dateRange, startDate, endDate } = req.query;
@@ -518,59 +673,98 @@ routes.get('/api/credit-distribution/:dataName', async (req, res) => {
     res.status(500).json({ status: "error", message: error.message });
   }
 });
-  
-routes.get('/api/loan/geographical-distribution', async (req, res) => {
-  try {
-    const { db, client } = await getDatabase('loan');
-    const collection = db.collection(collectionNames.loan);
 
-    // Aggregate leads by comm_city and comm_state
-    const aggregation = [
+routes.get('/api/model-user-counts/:dataName', async (req, res) => {
+  const dataName = req.params.dataName;
+  const { dateRange, customStartDate, customEndDate } = req.query;
+
+  // Adjust for IST (UTC+5:30)
+  const IST_OFFSET = 5.5 * 60 * 60000; // 5.5 hours in milliseconds
+
+  try {
+    const db = await getDatabase(dataName);
+    const collectionName = collectionNames[dataName];
+
+    if (!collectionName) {
+      return res.status(400).json({ status: "error", message: "No collection found for data name: " + dataName });
+    }
+
+    const collection = db.collection(collectionName);
+
+    // Build date filter using IST
+    const now = new Date();
+    let startDate, endDate;
+
+    if (dateRange === 'today') {
+      const istNow = new Date(now.getTime() - IST_OFFSET);
+      startDate = new Date(istNow.setHours(0, 0, 0, 0));
+      endDate = new Date(istNow.setHours(23, 59, 59, 999));
+    } else if (dateRange === 'thisWeek') {
+      const istNow = new Date(now.getTime() - IST_OFFSET);
+      const startOfWeek = new Date(istNow);
+      const dayOfWeek = istNow.getDay();
+      startOfWeek.setDate(istNow.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1)); // Move to Monday
+      startOfWeek.setHours(0, 0, 0, 0);
+      endDate = new Date(startOfWeek);
+      endDate.setDate(startOfWeek.getDate() + 6); // Sunday
+      endDate.setHours(23, 59, 59, 999);
+      startDate = startOfWeek;
+    } else if (dateRange === 'thisMonth') {
+      const istNow = new Date(now.getTime() - IST_OFFSET);
+      startDate = new Date(istNow.getFullYear(), istNow.getMonth(), 1);
+      endDate = new Date(istNow.getFullYear(), istNow.getMonth() + 1, 0);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (dateRange === 'custom' && customStartDate && customEndDate) {
+      startDate = new Date(new Date(customStartDate).getTime() - IST_OFFSET);
+      endDate = new Date(new Date(customEndDate).getTime() - IST_OFFSET + (23 * 60 + 59) * 60000 + 59000);
+    } else {
+      return res.status(400).json({ status: "error", message: "Invalid date range or missing custom dates" });
+    }
+    console.log("Start",startDate,endDate)
+
+    // Aggregation pipeline to count users for specific models
+    const pipeline = [
+      {
+        $match: {
+          createdAt: { $gte: startDate, $lte: endDate },
+          model: { $in: ['Kushaq', 'Slavia', 'Kodiaq'] }
+        }
+      },
       {
         $group: {
-          _id: {
-            city: "$d.comm_city",
-            state: "$d.comm_state",
-            pincode: "$d.comm_pincode",
-          },
-          count: { $sum: 1 },
-        },
+          _id: '$model',
+          count: { $sum: 1 }
+        }
       },
       {
-        $project: {
-          city: "$_id.city",
-          state: "$_id.state",
-          pincode: "$_id.pincode",
-          count: 1,
-          _id: 0,
-        },
-      },
+        $sort: { _id: 1 }
+      }
     ];
 
-    const results = await collection.aggregate(aggregation).toArray();
+    const results = await collection.aggregate(pipeline).toArray();
 
-    // Mock coordinates for cities (replace with real geocoding API in production)
-    const cityCoordinates = {
-      Etawah: { lat: 26.7767, lng: 79.0218 },
-      // Add more cities as needed
-    };
+    // Format results for Chart.js
+    const labels = ['Kushaq', 'Slavia', 'Kodiaq'];
+    const counts = new Array(3).fill(0);
 
-    const geoData = results.map(result => ({
-      city: result.city || 'Unknown',
-      state: result.state || 'Unknown',
-      pincode: result.pincode || 'Unknown',
-      count: result.count,
-      lat: cityCoordinates[result.city]?.lat || 20.5937, // Default to India center
-      lng: cityCoordinates[result.city]?.lng || 78.9629,
-    }));
-
-    await client.close();
-    res.json(geoData);
+    results.forEach(result => {
+      const index = labels.indexOf(result._id);
+      if (index !== -1) {
+        counts[index] = result.count;
+      }
+    });
+    console.log("data",labels,counts)
+    res.json({
+      status: "success",
+      data: { labels, counts },
+      message: "Model user counts retrieved successfully"
+    });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ status: "error", message: error.message });
   }
 });
+  
+
 
 module.exports = routes;
 
